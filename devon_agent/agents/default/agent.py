@@ -3,6 +3,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 import traceback
+import textwrap
 from typing import Optional, Tuple
 
 from devon_agent.agents.model import AnthropicModel, ModelArguments, OpenAiModel
@@ -10,6 +11,12 @@ from devon_agent.agents.default.anthropic_prompts import anthropic_history_to_ba
 from devon_agent.agents.default.openai_prompts import openai_last_user_prompt_template_v3, openai_system_prompt_template_v3, openai_commands_to_command_docs
 from devon_agent.agents.default.anthropic_prompts import (
     parse_response
+)
+from devon_agent.agents.model import OllamaModel
+from devon_agent.agents.default.ollama_prompts import (
+    ollama_system_prompt_template,
+    ollama_user_prompt_template,
+    ollama_commands_to_command_docs
 )
 from devon_agent.tools.utils import get_cwd
 
@@ -19,9 +26,8 @@ from tenacity import RetryError
 
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from devon_agent.session import Session
-
+# if TYPE_CHECKING:
+from devon_agent.session import Session, SessionArguments
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -268,3 +274,85 @@ SCRATCHPAD: {scratchpad}
                 "exit_error",
                 f"exit due to exception: {e}",
             )
+
+
+class PlanningAgent:
+    # the initialization logic could be implemented in
+    # Agent class and make PlanningAgent subclass, like TaskAgent
+    models = {
+        'phi3': OllamaModel
+    }
+
+    def __init__(self, model: str, temperature: float = 0.0,
+                 agent_name: str = "Planning Agent", api_key: Optional[str] = None):
+        if model not in self.models.keys():
+            raise ValueError(f"{model} not supported for PlanningAgent")
+
+        self.model_name = model
+        self.agent_name = agent_name
+        self.interrupt = ""
+
+        self.current_model = self.models[model](
+            ModelArguments(
+                model_name=model,
+                temperature=temperature,
+                api_key=api_key
+            )
+        )
+        self.history = []
+
+    def forward(self, observation: str, env: Session):
+        sys_prompt = textwrap.dedent(
+            f"""
+            You are a user-facing software engineer. 
+            Your job is to communicate with the user, understand user needs, plan and delegate. 
+            You may perform actions to achieve this.
+            Actions:
+            {env.get_available_actions()}
+            
+            Docs:
+            {env.generate_command_docs()}
+            
+            You must respond in the following format:ONLY ONE COMMAND AT A TIME
+            <THOUGHT>
+            
+            </THOUGHT>
+            <COMMAND>
+            </COMMAND>
+            """
+        )
+        usr_prompt = textwrap.dedent(
+            f"""
+            <OBSERVATION>
+            {observation}
+            </OBSERVATION>
+            """
+        )
+
+        self.history.append({"role": "user", "content": usr_prompt})
+
+        output = self.current_model.query(self.history, sys_prompt)
+        try:
+            thought, action, scratchpad = parse_response(output)
+        except Exception:
+            raise Hallucination(f"Wrong response format from PlanningAgent:\n{output}")
+
+        self.history.append({"role": "assistant", "content": output})
+
+        return thought, action, output
+
+    def run(self, env: Session, observation: str = None):
+        done = False
+        while not done:
+            pass
+            # generate action
+            thought, action, output = self.forward(observation, env)
+
+            # perform action
+            if action == "exit":
+                done = True
+
+            if action.strip() == "submit":
+                done = True
+
+            # TODO: complete implementation
